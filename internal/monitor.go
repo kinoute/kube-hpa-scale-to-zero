@@ -3,23 +3,22 @@ package internal
 import (
 	"context"
 	"fmt"
-	"github.com/go-logr/logr"
 	"os"
 	"runtime/debug"
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	metrics "github.com/SPSCommerce/kube-hpa-scale-to-zero/internal/metrics"
 	autoscaling "k8s.io/api/autoscaling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/metrics/pkg/client/custom_metrics"
 	"k8s.io/metrics/pkg/client/external_metrics"
 )
 
@@ -28,7 +27,6 @@ type hpaScopedContext struct {
 	hpa                   *autoscaling.HorizontalPodAutoscaler
 	logger                *logr.Logger
 	kubeClient            *kubernetes.Clientset
-	customMetricsClient   custom_metrics.CustomMetricsClient
 	externalMetricsClient external_metrics.ExternalMetricsClient
 }
 
@@ -54,34 +52,13 @@ func buildMetricsSelector(ctx hpaScopedContext, selector *metav1.LabelSelector) 
 
 func requestIfObjectMetricValueIsZero(ctx hpaScopedContext, spec *autoscaling.MetricSpec) (bool, error) {
 
-	selector, err := buildMetricsSelector(ctx, spec.Object.Selector)
+	_, err := buildMetricsSelector(ctx, spec.Object.Selector)
 
 	if err != nil {
 		return false, fmt.Errorf("not able to build selector for custom metric: %s", err)
 	}
 
-	var group string
-	if spec.Object.Target.Kind == "Service" {
-		group = ""
-	} else if spec.Object.Target.Kind == "Deployment" {
-		group = "apps"
-	} else {
-		metrics.ReportNotSupported(ctx.hpa.Namespace, ctx.hpa.Name)
-		return false, fmt.Errorf("unsupported metric target kind %s", spec.Object.Target.Kind)
-	}
-
-	result, err := ctx.customMetricsClient.NamespacedMetrics(ctx.hpa.Namespace).GetForObject(schema.GroupKind{
-		Group: group,
-		Kind:  spec.Object.Target.Kind,
-	}, spec.Object.Target.Name, spec.Object.MetricName, *selector)
-
-	if err != nil {
-		return false, fmt.Errorf("not able to get metric %s from %s %s: %s", spec.Object.MetricName,
-			group,
-			spec.Object.Target.Name, err)
-	}
-
-	return result.Value.IsZero(), nil
+	return false, nil
 
 }
 
@@ -138,17 +115,7 @@ func requestMetricValuesFromSpec(ctx hpaScopedContext) (*[]bool, error) {
 		go func(metric *autoscaling.MetricSpec, wg *sync.WaitGroup) {
 			defer wg.Done()
 
-			if metric.Type == "Object" {
-				isZero, err := requestIfObjectMetricValueIsZero(ctx, metric)
-
-				if err != nil {
-					metrics.ReportCustomMetricError(ctx.hpa.Namespace, ctx.hpa.Name)
-					ctx.logger.Error(err, "not able to get custom metric")
-				} else {
-					metricValues <- isZero
-				}
-
-			} else if metric.Type == "External" {
+			if metric.Type == "External" {
 				isZero, err := requestIfExternalMetricValueIsZero(ctx, metric)
 
 				if err != nil {
@@ -314,7 +281,6 @@ func actualizeHpaTargetState(ctx hpaScopedContext) error {
 func actualizeHpaState(ctx context.Context,
 	logger *logr.Logger,
 	kubeClient *kubernetes.Clientset,
-	customMetricsClient custom_metrics.CustomMetricsClient,
 	externalMetricsClient external_metrics.ExternalMetricsClient,
 	channel <-chan *autoscaling.HorizontalPodAutoscaler) {
 
@@ -335,7 +301,6 @@ func actualizeHpaState(ctx context.Context,
 			hpa:                   hpa,
 			logger:                &hpaLogger,
 			kubeClient:            kubeClient,
-			customMetricsClient:   customMetricsClient,
 			externalMetricsClient: externalMetricsClient,
 		}
 
@@ -355,7 +320,6 @@ func actualizeHpaState(ctx context.Context,
 func SetupHpaInformer(ctx context.Context,
 	logger *logr.Logger,
 	kubeClient *kubernetes.Clientset,
-	customMetricsClient custom_metrics.CustomMetricsClient,
 	externalMetricsClient external_metrics.ExternalMetricsClient,
 	hpaSelector string) {
 
@@ -368,7 +332,7 @@ func SetupHpaInformer(ctx context.Context,
 	hpaInformer := factory.Autoscaling().V1().HorizontalPodAutoscalers().Informer()
 
 	hpaQueue := make(chan *autoscaling.HorizontalPodAutoscaler)
-	go actualizeHpaState(ctx, logger, kubeClient, customMetricsClient, externalMetricsClient, hpaQueue)
+	go actualizeHpaState(ctx, logger, kubeClient, externalMetricsClient, hpaQueue)
 
 	go factory.Start(ctx.Done())
 	if !cache.WaitForCacheSync(ctx.Done(), hpaInformer.HasSynced) {

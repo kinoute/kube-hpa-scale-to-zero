@@ -3,22 +3,19 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
+	"os"
+
 	"github.com/SPSCommerce/kube-hpa-scale-to-zero/internal"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/context"
 	"k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/client-go/discovery/cached/disk"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/metrics/pkg/client/custom_metrics"
 	"k8s.io/metrics/pkg/client/external_metrics"
-	"net/http"
-	"os"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"time"
 )
 
 type RunConfiguration struct {
@@ -78,30 +75,17 @@ func main() {
 
 	client := kubernetes.NewForConfigOrDie(config)
 
-	discoveryClient, err := disk.NewCachedDiscoveryClientForConfig(config, ".discoveryCache", ".httpCache",
-		time.Second)
-
 	if err != nil {
 		logger.Error(err, "unable to create kubernetes discovery client")
 		os.Exit(1)
 	}
-
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
-
-	apiGetter := custom_metrics.NewAvailableAPIsGetter(discoveryClient)
-	_, err = apiGetter.PreferredVersion()
-	if err != nil {
-		logger.Error(err, "unable to discover custom metrics api")
-		os.Exit(1)
-	}
-	customMetricsClient := custom_metrics.NewForConfig(config, restMapper, custom_metrics.NewAvailableAPIsGetter(discoveryClient))
 
 	externalMetricsClient := external_metrics.NewForConfigOrDie(config)
 
 	ctx := context.Background()
 
 	informerLog := logger.WithName("Informer")
-	go internal.SetupHpaInformer(ctx, &informerLog, client, customMetricsClient, externalMetricsClient, runtimeConfig.HpaSelector)
+	go internal.SetupHpaInformer(ctx, &informerLog, client, externalMetricsClient, runtimeConfig.HpaSelector)
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.Handle("/up", http.HandlerFunc(UpEndpointHandler))
